@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.0
+// @version      2.0.1
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
 // @match        https://dashboard.highhelp.io/*
 // @match        https://merchant.wilsonpay.solutions/*
+// @downloadURL  https://raw.githubusercontent.com/TsukuyomiTim/Auto-Log/main/Unified-Pay-Login.user.js
+// @updateURL    https://raw.githubusercontent.com/TsukuyomiTim/Auto-Log/main/Unified-Pay-Login.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -771,3 +773,4 @@
   };
   window.addEventListener("popstate", () => setTimeout(renderPanel, 150));
 })();
+
