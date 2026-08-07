@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.2
+// @version      2.0.3
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
@@ -28,7 +28,7 @@
       { name: "CAT", login: "support_cat@gmali.com", password: "catcasino176574" },
       { name: "Gama", login: "support_gama@gmail.com", password: "gamacasino176574" },
       { name: "Daddy", login: "support_daddy@gmail.com", password: "daddycasino176574" },
-      { name: "Mers", login: "support_mers@gmail.com", password: "merscasino176574" },
+      { name: "Mers", login: "support_mers_new@gmail.com", password: "Qwerty123" },
       { name: "Kent", login: "support_kent@gmail.com", password: "kentcasino176574" },
       { name: "R7", login: "support_r7@gmail.com", password: "r7176574" },
       { name: "Kometa", login: "support_kometa@gmail.com", password: "kometa12345" },
