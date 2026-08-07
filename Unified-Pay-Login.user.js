@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.1
+// @version      2.0.2
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
@@ -181,11 +181,14 @@
     return b;
   }
 
-  async function generateTOTP(secret, step = 30, digits = 6) {
+  async function generateTOTP(secret, step = 30, digits = 6, waitFresh = true) {
     if (!secret) return "";
-    const epoch = Math.floor(Date.now() / 1000);
-    const remaining = step - (epoch % step);
-    if (remaining < 5) await sleep((remaining + 1) * 1000);
+    if (waitFresh) {
+      const epoch = Math.floor(Date.now() / 1000);
+      const remaining = step - (epoch % step);
+      // Ждём только если осталось < 3 сек (не 5) — меньше задержка при переключении
+      if (remaining < 3) await sleep((remaining + 1) * 1000);
+    }
     const key = base32ToBytes(secret);
     const counter = Math.floor(Date.now() / 1000 / step);
     const hash = await hmacSha1(key, intToBytes(counter));
@@ -196,6 +199,26 @@
       ((hash[offset + 2] & 0xff) << 8) |
       (hash[offset + 3] & 0xff);
     return String(binCode % 10 ** digits).padStart(digits, "0");
+  }
+
+  // Быстрый опрос OTP-полей (без долгого waitForElement)
+  function waitOtpInputs(timeout = 8000) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const check = () => {
+        const inputs = findOtpInputs();
+        if (inputs.length >= 6) {
+          resolve(inputs);
+          return;
+        }
+        if (Date.now() - start > timeout) {
+          resolve([]);
+          return;
+        }
+        setTimeout(check, 100);
+      };
+      check();
+    });
   }
 
   // ===== Pending via GM storage (survives navigation) =====
@@ -539,29 +562,26 @@
   }
 
   async function loginWilsonpay(account) {
-    const candidates = Array.from(document.querySelectorAll("input"))
-      .filter((i) => isVisible(i))
-      .filter((i) => (i.type || "").toLowerCase() !== "password")
-      .filter((i) => !i.disabled && !i.readOnly);
-    const byAuto = candidates.find((i) => (i.autocomplete || "").toLowerCase().includes("user"));
-    const byName = candidates.find((i) => /user|login|email/i.test(i.name || ""));
-    const byPlaceholder = candidates.find((i) =>
-      /логин|login|user|email/i.test(i.placeholder || "")
-    );
-    let user = byAuto || byName || byPlaceholder || candidates[0] || null;
-    let pass =
-      Array.from(document.querySelectorAll('input[type="password"]')).find(
-        (i) => isVisible(i) && !i.disabled && !i.readOnly
-      ) || null;
-
-    if (!user || !pass) {
-      await sleep(500);
-      user =
-        user ||
-        (await waitForElement("input:not([type='password']):not([type='hidden'])", 10000).catch(
-          () => null
-        ));
-      pass = pass || (await waitForElement("input[type='password']", 6000).catch(() => null));
+    // Ждём поля логина быстрее
+    let user = null;
+    let pass = null;
+    for (let i = 0; i < 40; i++) {
+      const candidates = Array.from(document.querySelectorAll("input"))
+        .filter((inp) => isVisible(inp))
+        .filter((inp) => (inp.type || "").toLowerCase() !== "password")
+        .filter((inp) => !inp.disabled && !inp.readOnly);
+      const byAuto = candidates.find((inp) => (inp.autocomplete || "").toLowerCase().includes("user"));
+      const byName = candidates.find((inp) => /user|login|email/i.test(inp.name || ""));
+      const byPlaceholder = candidates.find((inp) =>
+        /логин|login|user|email/i.test(inp.placeholder || "")
+      );
+      user = byAuto || byName || byPlaceholder || candidates[0] || null;
+      pass =
+        Array.from(document.querySelectorAll('input[type="password"]')).find(
+          (inp) => isVisible(inp) && !inp.disabled && !inp.readOnly
+        ) || null;
+      if (user && pass) break;
+      await sleep(150);
     }
     if (!user || !pass) {
       console.warn("[Unified] WilsonPay fields not found");
@@ -569,18 +589,9 @@
     }
 
     setNativeValue(user, account.username || "");
-    await sleep(100);
+    await sleep(60);
     setNativeValue(pass, account.password || "");
-    await sleep(150);
-
-    const totpCode = await generateTOTP(account.totpSecret);
-    let otpInputs = findOtpInputs();
-    if (otpInputs.length >= 6 && totpCode) {
-      for (let i = 0; i < 6; i++) {
-        setNativeValue(otpInputs[i], totpCode[i] || "");
-        await sleep(40);
-      }
-    }
+    await sleep(80);
 
     const btn =
       document.querySelector('button[type="submit"]') ||
@@ -589,31 +600,79 @@
       );
     if (btn) btn.click();
 
-    if (totpCode) {
-      try {
-        await waitForElement("input[maxlength='1']", 15000);
-        otpInputs = findOtpInputs();
-        if (otpInputs.length >= 6) {
+    // OTP: генерируем код ПЕРЕД заполнением (свежий), опрашиваем поля каждые 100мс
+    let otpInputs = await waitOtpInputs(10000);
+    if (otpInputs.length >= 6) {
+      const totpCode = await generateTOTP(account.totpSecret, 30, 6, true);
+      if (totpCode) {
+        for (let i = 0; i < 6; i++) {
+          otpInputs[i].focus();
+          setNativeValue(otpInputs[i], totpCode[i] || "");
+          await sleep(25);
+        }
+        await sleep(150);
+        const confirm = [...document.querySelectorAll("button")].find((b) =>
+          /confirm|verify|подтвердить|submit|войти|вход|continue/i.test(b.innerText || "")
+        );
+        if (confirm) confirm.click();
+      }
+    } else {
+      // Повторная попытка — иногда OTP появляется позже
+      otpInputs = await waitOtpInputs(6000);
+      if (otpInputs.length >= 6) {
+        const totpCode = await generateTOTP(account.totpSecret, 30, 6, false);
+        if (totpCode) {
           for (let i = 0; i < 6; i++) {
+            otpInputs[i].focus();
             setNativeValue(otpInputs[i], totpCode[i] || "");
-            await sleep(40);
+            await sleep(25);
           }
-          await sleep(250);
+          await sleep(150);
           const confirm = [...document.querySelectorAll("button")].find((b) =>
-            /confirm|verify|подтвердить|submit|войти|вход/i.test(b.innerText || "")
+            /confirm|verify|подтвердить|submit|войти|вход|continue/i.test(b.innerText || "")
           );
           if (confirm) confirm.click();
         }
-      } catch (e) {}
+      }
     }
 
-    ensureAliveAfterLogin("wilsonpay");
+    // Чёрный экран: проверяем чаще и уходим на home / reload
+    const fixBlack = () => {
+      try {
+        if (getSite() !== "wilsonpay") return;
+        if (isOnLoginPage("wilsonpay")) return;
+        const body = document.body;
+        if (!body) {
+          window.location.replace(HOME_URLS.wilsonpay);
+          return;
+        }
+        const text = (body.innerText || "").trim();
+        const bg = window.getComputedStyle(body).backgroundColor;
+        const kids = body.children.length;
+        const empty =
+          text.length < 40 ||
+          (kids < 3 && text.length < 80) ||
+          bg === "rgb(0, 0, 0)" ||
+          bg === "rgb(0,0,0)";
+        if (empty) {
+          console.log("[Unified] WilsonPay blank → home");
+          window.location.replace(HOME_URLS.wilsonpay);
+        }
+      } catch (e) {}
+    };
+    setTimeout(fixBlack, 1200);
+    setTimeout(fixBlack, 2500);
+    setTimeout(fixBlack, 4500);
+    // Если через 6с всё ещё пусто — hard reload home
     setTimeout(() => {
-      if (getSite() === "wilsonpay" && !isOnLoginPage("wilsonpay")) {
-        const t = ((document.body && document.body.innerText) || "").trim();
-        if (t.length < 30) window.location.href = HOME_URLS.wilsonpay;
-      }
-    }, 3500);
+      try {
+        if (getSite() === "wilsonpay" && !isOnLoginPage("wilsonpay")) {
+          const t = ((document.body && document.body.innerText) || "").trim();
+          if (t.length < 50) window.location.href = HOME_URLS.wilsonpay + "?_=" + Date.now();
+        }
+      } catch (e) {}
+    }, 6000);
+
     return true;
   }
 
@@ -773,4 +832,3 @@
   };
   window.addEventListener("popstate", () => setTimeout(renderPanel, 150));
 })();
-
