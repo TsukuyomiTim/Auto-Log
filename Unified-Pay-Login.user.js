@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.3
+// @version      2.0.4
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
 // @match        https://dashboard.highhelp.io/*
+// @match        https://merchant.pspxyz.xyz/*
 // @match        https://merchant.wilsonpay.solutions/*
 // @downloadURL  https://raw.githubusercontent.com/TsukuyomiTim/Auto-Log/main/Unified-Pay-Login.user.js
 // @updateURL    https://raw.githubusercontent.com/TsukuyomiTim/Auto-Log/main/Unified-Pay-Login.user.js
@@ -63,20 +64,20 @@
   const LOGIN_URLS = {
     paycos: "https://core.paycos.com/support/auth/login",
     highhelp: "https://dashboard.highhelp.io/auth/login",
-    wilsonpay: "https://merchant.wilsonpay.solutions/login"
+    wilsonpay: "https://merchant.pspxyz.xyz/login"
   };
 
   const HOME_URLS = {
     paycos: "https://core.paycos.com/",
     highhelp: "https://dashboard.highhelp.io/",
-    wilsonpay: "https://merchant.wilsonpay.solutions/"
+    wilsonpay: "https://merchant.pspxyz.xyz/"
   };
 
   function getSite() {
     const host = location.hostname;
     if (host.includes("paycos.com")) return "paycos";
     if (host.includes("highhelp.io")) return "highhelp";
-    if (host.includes("wilsonpay.solutions")) return "wilsonpay";
+    if (host.includes("pspxyz.xyz") || host.includes("wilsonpay.solutions")) return "wilsonpay";
     return null;
   }
 
@@ -363,6 +364,8 @@
       await clearDomainCookiesGM("dashboard.highhelp.io");
       await clearDomainCookiesGM("highhelp.io");
     } else if (site === "wilsonpay") {
+      await clearDomainCookiesGM(".pspxyz.xyz");
+      await clearDomainCookiesGM("merchant.pspxyz.xyz");
       await clearDomainCookiesGM(".wilsonpay.solutions");
       await clearDomainCookiesGM("merchant.wilsonpay.solutions");
     } else if (site === "paycos") {
