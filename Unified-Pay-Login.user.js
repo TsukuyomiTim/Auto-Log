@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.6
+// @version      2.0.7
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
@@ -245,53 +245,59 @@
   }
 
   // ===== Pending via GM storage (survives navigation) =====
-  function urlHasUnified() {
+  function nameFromUrl() {
     try {
-      if (new URLSearchParams(location.search).get("unified")) return true;
+      const q = new URLSearchParams(location.search).get("unified");
+      if (q) return decodeURIComponent(q);
     } catch (e) {}
-    if (location.hash && /[#&]unified=/i.test(location.hash)) return true;
-    return false;
+    const m = (location.hash || "").match(/#unified=([^&]+)/);
+    if (m) return decodeURIComponent(m[1]);
+    return null;
   }
 
-  function setUnifiedOnUrl(name) {
+  function readGmJson(key) {
     try {
-      const u = new URL(location.href);
-      u.searchParams.set("unified", name);
-      u.hash = "";
-      history.replaceState(null, "", u.pathname + u.search);
-    } catch (e) {}
+      const raw = GM_getValue(key, null);
+      if (!raw) return null;
+      return typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (e) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch (e2) {
+        return null;
+      }
+    }
+  }
+
+  function writeGmJson(key, obj) {
+    const raw = JSON.stringify(obj);
+    try {
+      GM_setValue(key, raw);
+    } catch (e) {
+      try {
+        localStorage.setItem(key, raw);
+      } catch (e2) {}
+    }
   }
 
   function savePending(site, account) {
     const gen = nextLoginGen();
-    const data = { site, name: account.name, ts: Date.now(), gen };
-    try {
-      GM_setValue("__unified_pending", JSON.stringify(data));
-      GM_setValue("__unified_target", account.name);
-    } catch (e) {
-      try {
-        localStorage.setItem("__unified_pending", JSON.stringify(data));
-        localStorage.setItem("__unified_target", account.name);
-      } catch (e2) {}
-    }
-    setUnifiedOnUrl(account.name);
+    const data = { site, name: account.name, ts: Date.now(), gen, expectResume: true };
+    writeGmJson("__unified_pending", data);
     return data;
   }
 
-  function loadPendingFromUrl() {
-    try {
-      const q = new URLSearchParams(location.search).get("unified");
-      if (q) return { site: getSite(), name: decodeURIComponent(q), ts: Date.now() };
-    } catch (e) {}
-    const m = (location.hash || "").match(/#unified=([^&]+)/);
-    if (m) return { site: getSite(), name: decodeURIComponent(m[1]), ts: Date.now() };
-    return null;
-  }
-
   function loadPending() {
-    const fromUrl = loadPendingFromUrl();
-    if (fromUrl) return fromUrl;
-    return null;
+    const fromUrl = nameFromUrl();
+    if (fromUrl) return { site: getSite(), name: fromUrl, ts: Date.now() };
+
+    const data = readGmJson("__unified_pending");
+    if (!data || !data.name) return null;
+    if (!data.expectResume) return null;
+    if (!data.ts || Date.now() - data.ts > 45000) return null;
+    return data;
   }
 
   function clearPending() {
@@ -305,13 +311,19 @@
     } catch (e) {}
   }
 
+  function consumeResumeFlag() {
+    const data = readGmJson("__unified_pending");
+    if (data) {
+      data.expectResume = false;
+      writeGmJson("__unified_pending", data);
+    }
+  }
+
   function getIntendedName() {
-    try {
-      const q = new URLSearchParams(location.search).get("unified");
-      if (q) return decodeURIComponent(q);
-    } catch (e) {}
-    const m = (location.hash || "").match(/#unified=([^&]+)/);
-    if (m) return decodeURIComponent(m[1]);
+    const fromUrl = nameFromUrl();
+    if (fromUrl) return fromUrl;
+    const data = readGmJson("__unified_pending");
+    if (data && data.name && data.ts && Date.now() - data.ts < 45000) return data.name;
     return null;
   }
 
@@ -394,7 +406,7 @@
     return false;
   }
 
-  async function performLogout(site) {
+  async function performLogout(site, accountName) {
     findAndClickLogout();
     await sleep(400);
     clearAuthStorage();
@@ -429,11 +441,17 @@
       }
     } catch (e) {}
 
+    const loginWithTarget = (base) => {
+      if (!accountName) return base;
+      const join = base.includes("?") ? "&" : "?";
+      return base + join + "unified=" + encodeURIComponent(accountName);
+    };
+
     if (site === "paycos") {
       window.location.href = "/support/auth/logout";
       setTimeout(() => {
         if (!location.pathname.toLowerCase().includes("/auth/login")) {
-          window.location.href = LOGIN_URLS.paycos;
+          window.location.href = loginWithTarget(LOGIN_URLS.paycos);
         }
       }, 1600);
       return;
@@ -463,13 +481,7 @@
         )
       );
       clearAuthStorage();
-      {
-        const intended = getIntendedName();
-        const url = intended
-          ? LOGIN_URLS.highhelp + "?unified=" + encodeURIComponent(intended)
-          : LOGIN_URLS.highhelp;
-        window.location.replace(url);
-      }
+      window.location.replace(loginWithTarget(LOGIN_URLS.highhelp));
       return;
     }
 
@@ -487,7 +499,7 @@
         )
       );
       clearAuthStorage();
-      window.location.replace(LOGIN_URLS.wilsonpay);
+      window.location.replace(loginWithTarget(LOGIN_URLS.wilsonpay));
       return;
     }
   }
@@ -767,7 +779,7 @@
 
       if (!isOnLoginPage(site)) {
         console.log("[Unified] Not on login → logout + redirect");
-        await performLogout(site);
+        await performLogout(site, account.name);
         return;
       }
 
@@ -784,14 +796,14 @@
     const site = getSite();
     if (!site) return;
 
-    // Ручной выход: на /login без ?unified= — НЕ логиним старый аккаунт из storage
-    if (!urlHasUnified()) {
+    const pendingEarly = loadPending();
+    if (!pendingEarly) {
       clearPending();
       return;
     }
 
     let attempts = 0;
-    while (attempts < 30 && !isOnLoginPage(site)) {
+    while (attempts < 40 && !isOnLoginPage(site)) {
       await sleep(250);
       attempts++;
     }
@@ -799,11 +811,12 @@
     if (resumeStarted) return;
     resumeStarted = true;
 
-    const pending = loadPendingFromUrl();
+    const pending = loadPending();
     if (!pending || (pending.site && pending.site !== site)) {
       resumeStarted = false;
       return;
     }
+    consumeResumeFlag();
 
     const accounts = ACCOUNTS[site] || [];
     const account = accounts.find(
