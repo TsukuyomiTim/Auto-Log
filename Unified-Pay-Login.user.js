@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.7
+// @version      2.0.8
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
@@ -282,7 +282,10 @@
     }
   }
 
+  let forcedName = null;
+
   function savePending(site, account) {
+    forcedName = account.name;
     const gen = nextLoginGen();
     const data = { site, name: account.name, ts: Date.now(), gen, expectResume: true };
     writeGmJson("__unified_pending", data);
@@ -320,10 +323,9 @@
   }
 
   function getIntendedName() {
+    if (forcedName) return forcedName;
     const fromUrl = nameFromUrl();
     if (fromUrl) return fromUrl;
-    const data = readGmJson("__unified_pending");
-    if (data && data.name && data.ts && Date.now() - data.ts < 45000) return data.name;
     return null;
   }
 
@@ -554,9 +556,8 @@
 
   async function loginHighhelp(account, gen) {
     const stillThis = () => {
-      const intended = getIntendedName();
-      if (intended && intended.toLowerCase() !== account.name.toLowerCase()) {
-        console.log("[Unified] HighHelp abort:", account.name, "→ intended", intended);
+      if (forcedName && forcedName.toLowerCase() !== account.name.toLowerCase()) {
+        console.log("[Unified] HighHelp abort:", account.name, "→ forced", forcedName);
         return false;
       }
       if (gen != null && !isCurrentGen(gen)) {
@@ -577,18 +578,35 @@
       console.warn("[Unified] HighHelp fields not found");
       return false;
     }
+
+    try {
+      email.setAttribute("autocomplete", "off");
+      password.setAttribute("autocomplete", "off");
+    } catch (e) {}
+
+    const holdValues = async () => {
+      const start = Date.now();
+      while (Date.now() - start < 500) {
+        if (!stillThis()) return false;
+        if ((email.value || "") !== account.email) setNativeValue(email, account.email);
+        if ((password.value || "") !== account.password) setNativeValue(password, account.password);
+        await sleep(40);
+      }
+      setNativeValue(email, account.email);
+      setNativeValue(password, account.password);
+      return true;
+    };
+
     setNativeValue(email, account.email);
-    await sleep(80);
-    if (!stillThis()) return false;
     setNativeValue(password, account.password);
-    await sleep(150);
+    if (!(await holdValues())) return false;
     if (!stillThis()) return false;
 
-    // Перезаписываем ещё раз на случай автозаполнения браузером (старый Arkada)
-    setNativeValue(email, account.email);
-    setNativeValue(password, account.password);
-    await sleep(80);
-    if (!stillThis()) return false;
+    if ((email.value || "") !== account.email || (password.value || "") !== account.password) {
+      setNativeValue(email, account.email);
+      setNativeValue(password, account.password);
+      await sleep(50);
+    }
 
     const submit = document.querySelector("button[type='submit']");
     if (submit) submit.click();
@@ -783,8 +801,14 @@
         return;
       }
 
-      if (site === "paycos") await loginPaycos(account);
-      else if (site === "highhelp") await loginHighhelp(account, pending.gen);
+      if (site === "highhelp") {
+        // Ручной выход мог оставить сессию/cookies прошлого аккаунта
+        clearAuthStorage();
+        await clearDomainCookiesGM(".highhelp.io");
+        await clearDomainCookiesGM("dashboard.highhelp.io");
+        await clearDomainCookiesGM("highhelp.io");
+        await loginHighhelp(account, pending.gen);
+      } else if (site === "paycos") await loginPaycos(account);
       else if (site === "wilsonpay") await loginWilsonpay(account);
     } catch (e) {
       console.error("[Unified] switch error", e);
