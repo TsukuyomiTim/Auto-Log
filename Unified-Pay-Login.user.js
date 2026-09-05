@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.4
+// @version      2.0.5
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
@@ -87,7 +87,11 @@
       return path.includes("/support/auth/login") || !!document.querySelector("#signin_email, #signin_password");
     }
     if (site === "highhelp") {
-      return path.includes("/auth/login") || !!document.querySelector("input[type='email'], input[name='email']");
+      const onAuthPath = path.includes("/auth/login") || path.includes("/login");
+      const hasLoginForm =
+        !!document.querySelector("input[type='password']") &&
+        !!document.querySelector("input[type='email'], input[name='email']");
+      return onAuthPath || hasLoginForm;
     }
     if (site === "wilsonpay") {
       return path.includes("/login") ||
@@ -222,26 +226,49 @@
     });
   }
 
+  // Поколение логина: старые async-логины (Arkada) отменяются, если выбран CAT
+  let loginGen = 0;
+  function nextLoginGen() {
+    loginGen += 1;
+    try {
+      GM_setValue("__unified_gen", loginGen);
+    } catch (e) {}
+    return loginGen;
+  }
+  function isCurrentGen(gen) {
+    let stored = null;
+    try {
+      stored = GM_getValue("__unified_gen", null);
+    } catch (e) {}
+    if (stored != null) return Number(stored) === Number(gen);
+    return Number(gen) === Number(loginGen);
+  }
+
   // ===== Pending via GM storage (survives navigation) =====
   function savePending(site, account) {
-    const data = { site, name: account.name, ts: Date.now() };
+    const gen = nextLoginGen();
+    const data = { site, name: account.name, ts: Date.now(), gen };
     try {
       GM_setValue("__unified_pending", JSON.stringify(data));
+      GM_setValue("__unified_target", account.name);
     } catch (e) {
       try {
         localStorage.setItem("__unified_pending", JSON.stringify(data));
+        localStorage.setItem("__unified_target", account.name);
       } catch (e2) {}
     }
-    try {
-      history.replaceState(
-        null,
-        "",
-        location.pathname + location.search + "#unified=" + encodeURIComponent(account.name)
-      );
-    } catch (e) {}
+    return data;
   }
 
   function loadPending() {
+    // URL ?unified=NAME важнее storage — так не подтянется старый Arkada
+    try {
+      const q = new URLSearchParams(location.search).get("unified");
+      if (q) return { site: getSite(), name: decodeURIComponent(q), ts: Date.now() };
+    } catch (e) {}
+    const m = (location.hash || "").match(/#unified=([^&]+)/);
+    if (m) return { site: getSite(), name: decodeURIComponent(m[1]), ts: Date.now() };
+
     let raw = null;
     try {
       raw = GM_getValue("__unified_pending", null);
@@ -256,8 +283,6 @@
         if (data && data.ts && Date.now() - data.ts < 90000) return data;
       } catch (e) {}
     }
-    const m = (location.hash || "").match(/#unified=([^&]+)/);
-    if (m) return { site: getSite(), name: decodeURIComponent(m[1]), ts: Date.now() };
     return null;
   }
 
@@ -273,6 +298,22 @@
         history.replaceState(null, "", location.pathname + location.search);
       }
     } catch (e) {}
+  }
+
+  function getIntendedName() {
+    try {
+      const q = new URLSearchParams(location.search).get("unified");
+      if (q) return decodeURIComponent(q);
+    } catch (e) {}
+    try {
+      const t = GM_getValue("__unified_target", null);
+      if (t) return String(t);
+    } catch (e) {}
+    try {
+      const t = localStorage.getItem("__unified_target");
+      if (t) return String(t);
+    } catch (e) {}
+    return null;
   }
 
   function clearAuthStorage() {
@@ -423,7 +464,13 @@
         )
       );
       clearAuthStorage();
-      window.location.replace(LOGIN_URLS.highhelp);
+      {
+        const intended = getIntendedName();
+        const url = intended
+          ? LOGIN_URLS.highhelp + "?unified=" + encodeURIComponent(intended)
+          : LOGIN_URLS.highhelp;
+        window.location.replace(url);
+      }
       return;
     }
 
@@ -494,23 +541,49 @@
     return true;
   }
 
-  async function loginHighhelp(account) {
+  async function loginHighhelp(account, gen) {
+    const stillThis = () => {
+      const intended = getIntendedName();
+      if (intended && intended.toLowerCase() !== account.name.toLowerCase()) {
+        console.log("[Unified] HighHelp abort:", account.name, "→ intended", intended);
+        return false;
+      }
+      if (gen != null && !isCurrentGen(gen)) {
+        console.log("[Unified] HighHelp abort stale gen", account.name);
+        return false;
+      }
+      return true;
+    };
+
+    if (!stillThis()) return false;
+
     const email = await waitForElement("input[type='email'], input[name='email']", 15000).catch(
       () => null
     );
     const password = await waitForElement("input[type='password']", 6000).catch(() => null);
+    if (!stillThis()) return false;
     if (!email || !password) {
       console.warn("[Unified] HighHelp fields not found");
       return false;
     }
     setNativeValue(email, account.email);
-    await sleep(120);
+    await sleep(80);
+    if (!stillThis()) return false;
     setNativeValue(password, account.password);
-    await sleep(300);
+    await sleep(150);
+    if (!stillThis()) return false;
+
+    // Перезаписываем ещё раз на случай автозаполнения браузером (старый Arkada)
+    setNativeValue(email, account.email);
+    setNativeValue(password, account.password);
+    await sleep(80);
+    if (!stillThis()) return false;
+
     const submit = document.querySelector("button[type='submit']");
     if (submit) submit.click();
 
     const totp = await generateTOTP(account.totpSecret);
+    if (!stillThis()) return false;
     if (!totp) {
       ensureAliveAfterLogin("highhelp");
       return true;
@@ -518,16 +591,21 @@
 
     try {
       await waitForElement("input[maxlength='1'][inputmode='numeric']", 20000);
+      if (!stillThis()) return false;
       const otpInputs = [
         ...document.querySelectorAll("input[maxlength='1'][inputmode='numeric']")
       ].slice(0, 6);
       if (otpInputs.length === 6) {
+        const fresh = await generateTOTP(account.totpSecret, 30, 6, false);
+        const code = fresh || totp;
         for (let i = 0; i < 6; i++) {
+          if (!stillThis()) return false;
           otpInputs[i].focus();
-          setNativeValue(otpInputs[i], totp[i] || "");
-          await sleep(60);
+          setNativeValue(otpInputs[i], code[i] || "");
+          await sleep(50);
         }
-        await sleep(400);
+        await sleep(300);
+        if (!stillThis()) return false;
         const modal =
           otpInputs[0].closest('[role="dialog"], .modal, .MuiDialog-root, form') || document;
         const confirmBtn = [...modal.querySelectorAll("button")].find((b) =>
@@ -539,11 +617,13 @@
       }
     } catch (e) {}
 
+    if (!stillThis()) return false;
     try {
       const otp = await waitForElement(
         "input[name*='otp'], input[name*='code'], input[autocomplete='one-time-code']",
         12000
       );
+      if (!stillThis()) return false;
       setNativeValue(otp, totp);
       const submit2 = document.querySelector("button[type='submit']");
       if (submit2) submit2.click();
@@ -679,14 +759,12 @@
     return true;
   }
 
-  let switching = false;
+  let resumeStarted = false;
 
   async function switchAccount(account, site) {
-    if (switching) return;
-    switching = true;
     try {
       console.log("[Unified] Switch →", account.name, site);
-      savePending(site, account);
+      const pending = savePending(site, account);
 
       if (!isOnLoginPage(site)) {
         console.log("[Unified] Not on login → logout + redirect");
@@ -694,20 +772,16 @@
         return;
       }
 
-      clearPending();
       if (site === "paycos") await loginPaycos(account);
-      else if (site === "highhelp") await loginHighhelp(account);
+      else if (site === "highhelp") await loginHighhelp(account, pending.gen);
       else if (site === "wilsonpay") await loginWilsonpay(account);
     } catch (e) {
       console.error("[Unified] switch error", e);
-    } finally {
-      setTimeout(() => {
-        switching = false;
-      }, 3000);
     }
   }
 
   async function resumePendingLogin() {
+    if (resumeStarted) return;
     const site = getSite();
     if (!site) return;
 
@@ -717,9 +791,14 @@
       attempts++;
     }
     if (!isOnLoginPage(site)) return;
+    if (resumeStarted) return;
+    resumeStarted = true;
 
     const pending = loadPending();
-    if (!pending || pending.site !== site) return;
+    if (!pending || (pending.site && pending.site !== site)) {
+      resumeStarted = false;
+      return;
+    }
 
     const accounts = ACCOUNTS[site] || [];
     const account = accounts.find(
@@ -727,16 +806,23 @@
     );
     if (!account) {
       clearPending();
+      resumeStarted = false;
       return;
     }
 
     console.log("[Unified] Resume login for", account.name);
-    clearPending();
-    await sleep(700);
+    await sleep(400);
 
-    if (site === "paycos") await loginPaycos(account);
-    else if (site === "highhelp") await loginHighhelp(account);
-    else if (site === "wilsonpay") await loginWilsonpay(account);
+    // Ещё раз проверяем цель — вдруг кликнули другой аккаунт
+    const intended = getIntendedName() || pending.name;
+    const finalAccount =
+      accounts.find((a) => a.name.toLowerCase() === String(intended).toLowerCase()) || account;
+
+    if (site === "paycos") await loginPaycos(finalAccount);
+    else if (site === "highhelp") await loginHighhelp(finalAccount, pending.gen);
+    else if (site === "wilsonpay") await loginWilsonpay(finalAccount);
+
+    clearPending();
   }
 
   function renderPanel() {
@@ -807,9 +893,7 @@
 
   function init() {
     renderPanel();
-    setTimeout(resumePendingLogin, 400);
-    setTimeout(resumePendingLogin, 1200);
-    setTimeout(resumePendingLogin, 2500);
+    setTimeout(resumePendingLogin, 300);
   }
 
   if (document.readyState === "loading") {
