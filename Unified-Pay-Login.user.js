@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Unified Pay Login Panel
 // @namespace    unified-pay-login
-// @version      2.0.5
+// @version      2.0.6
 // @description  Фиксированная панель аккаунтов: Paycos / HighHelp / WilsonPay. Выход + вход по клику.
 // @author       unified
 // @match        https://core.paycos.com/*
@@ -245,6 +245,23 @@
   }
 
   // ===== Pending via GM storage (survives navigation) =====
+  function urlHasUnified() {
+    try {
+      if (new URLSearchParams(location.search).get("unified")) return true;
+    } catch (e) {}
+    if (location.hash && /[#&]unified=/i.test(location.hash)) return true;
+    return false;
+  }
+
+  function setUnifiedOnUrl(name) {
+    try {
+      const u = new URL(location.href);
+      u.searchParams.set("unified", name);
+      u.hash = "";
+      history.replaceState(null, "", u.pathname + u.search);
+    } catch (e) {}
+  }
+
   function savePending(site, account) {
     const gen = nextLoginGen();
     const data = { site, name: account.name, ts: Date.now(), gen };
@@ -257,46 +274,34 @@
         localStorage.setItem("__unified_target", account.name);
       } catch (e2) {}
     }
+    setUnifiedOnUrl(account.name);
     return data;
   }
 
-  function loadPending() {
-    // URL ?unified=NAME важнее storage — так не подтянется старый Arkada
+  function loadPendingFromUrl() {
     try {
       const q = new URLSearchParams(location.search).get("unified");
       if (q) return { site: getSite(), name: decodeURIComponent(q), ts: Date.now() };
     } catch (e) {}
     const m = (location.hash || "").match(/#unified=([^&]+)/);
     if (m) return { site: getSite(), name: decodeURIComponent(m[1]), ts: Date.now() };
+    return null;
+  }
 
-    let raw = null;
-    try {
-      raw = GM_getValue("__unified_pending", null);
-    } catch (e) {
-      try {
-        raw = localStorage.getItem("__unified_pending");
-      } catch (e2) {}
-    }
-    if (raw) {
-      try {
-        const data = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (data && data.ts && Date.now() - data.ts < 90000) return data;
-      } catch (e) {}
-    }
+  function loadPending() {
+    const fromUrl = loadPendingFromUrl();
+    if (fromUrl) return fromUrl;
     return null;
   }
 
   function clearPending() {
     try {
       GM_deleteValue("__unified_pending");
+      GM_deleteValue("__unified_target");
     } catch (e) {}
     try {
       localStorage.removeItem("__unified_pending");
-    } catch (e) {}
-    try {
-      if (location.hash && location.hash.includes("unified=")) {
-        history.replaceState(null, "", location.pathname + location.search);
-      }
+      localStorage.removeItem("__unified_target");
     } catch (e) {}
   }
 
@@ -305,14 +310,8 @@
       const q = new URLSearchParams(location.search).get("unified");
       if (q) return decodeURIComponent(q);
     } catch (e) {}
-    try {
-      const t = GM_getValue("__unified_target", null);
-      if (t) return String(t);
-    } catch (e) {}
-    try {
-      const t = localStorage.getItem("__unified_target");
-      if (t) return String(t);
-    } catch (e) {}
+    const m = (location.hash || "").match(/#unified=([^&]+)/);
+    if (m) return decodeURIComponent(m[1]);
     return null;
   }
 
@@ -785,6 +784,12 @@
     const site = getSite();
     if (!site) return;
 
+    // Ручной выход: на /login без ?unified= — НЕ логиним старый аккаунт из storage
+    if (!urlHasUnified()) {
+      clearPending();
+      return;
+    }
+
     let attempts = 0;
     while (attempts < 30 && !isOnLoginPage(site)) {
       await sleep(250);
@@ -794,7 +799,7 @@
     if (resumeStarted) return;
     resumeStarted = true;
 
-    const pending = loadPending();
+    const pending = loadPendingFromUrl();
     if (!pending || (pending.site && pending.site !== site)) {
       resumeStarted = false;
       return;
